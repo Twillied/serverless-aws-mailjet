@@ -16,9 +16,6 @@
       "email": "hw@hollo.me"
     }
   ],
-  "bin": [
-    "bin/fcgiget"
-  ],
   "autoload": {
     "psr-4": {
       "hollodotme\\FastCGI\\": "src/"
@@ -30,7 +27,8 @@
     }
   },
   "require": {
-    "php": ">=7.1"
+    "php": ">=7.1",
+    "ext-json": "*"
   },
   "require-dev": {
     "tm/tooly-composer-script": "^1.0"
@@ -48,6 +46,11 @@
       },
       "phpunit8": {
         "url": "https://phar.phpunit.de/phpunit-8.phar",
+        "replace": true,
+        "only-dev": true
+      },
+      "phpunit9": {
+        "url": "https://phar.phpunit.de/phpunit-9.phar",
         "replace": true,
         "only-dev": true
       }

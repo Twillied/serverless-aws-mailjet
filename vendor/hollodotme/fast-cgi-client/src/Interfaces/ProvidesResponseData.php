@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 /*
  * Copyright (c) 2010-2014 Pierrick Charron
- * Copyright (c) 2016-2019 Holger Woltersdorf & Contributors
+ * Copyright (c) 2016-2020 Holger Woltersdorf & Contributors
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -29,19 +29,21 @@ namespace hollodotme\FastCGI\Interfaces;
  */
 interface ProvidesResponseData
 {
-	public function getRequestId() : int;
-
+	/**
+	 * @return array<string, array<int,string>>
+	 */
 	public function getHeaders() : array;
 
-	public function getHeader( string $headerKey ) : string;
+	/**
+	 * @param string $headerKey
+	 *
+	 * @return array<int, string>
+	 */
+	public function getHeader( string $headerKey ) : array;
+
+	public function getHeaderLine( string $headerKey ) : string;
 
 	public function getBody() : string;
-
-	/**
-	 * @return string
-	 * @deprecated Will be removed in v3.0.0. Please use ProvidesResponseData#getOutput() instead.
-	 */
-	public function getRawResponse() : string;
 
 	public function getOutput() : string;
 

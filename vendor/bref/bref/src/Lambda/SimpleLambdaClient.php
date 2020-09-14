@@ -2,8 +2,8 @@
 
 namespace Bref\Lambda;
 
-use Aws\Lambda\LambdaClient;
-use Psr\Http\Message\StreamInterface;
+use AsyncAws\Lambda\LambdaClient;
+use Symfony\Component\HttpClient\HttpClient;
 
 /**
  * A simpler alternative to the official LambdaClient from the AWS SDK.
@@ -13,12 +13,18 @@ final class SimpleLambdaClient
     /** @var LambdaClient */
     private $lambda;
 
-    public function __construct(string $region)
+    public function __construct(string $region, string $profile, int $timeout = 60)
     {
-        $this->lambda = new LambdaClient([
-            'version' => 'latest',
-            'region' => $region,
-        ]);
+        $this->lambda = new LambdaClient(
+            [
+                'region' => $region,
+                'profile' => $profile,
+            ],
+            null,
+            HttpClient::create([
+                'timeout' => $timeout,
+            ])
+        );
     }
 
     /**
@@ -35,13 +41,10 @@ final class SimpleLambdaClient
             'Payload' => $event ?? '',
         ]);
 
-        /** @var StreamInterface $resultPayload */
-        $resultPayload = $rawResult->get('Payload');
-        $resultPayload = json_decode($resultPayload->getContents(), true);
-
+        $resultPayload = json_decode($rawResult->getPayload(), true);
         $invocationResult = new InvocationResult($rawResult, $resultPayload);
 
-        $error = $rawResult->get('FunctionError');
+        $error = $rawResult->getFunctionError();
         if ($error) {
             throw new InvocationFailed($invocationResult);
         }

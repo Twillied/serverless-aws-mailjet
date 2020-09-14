@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 /*
  * Copyright (c) 2010-2014 Pierrick Charron
- * Copyright (c) 2016-2019 Holger Woltersdorf & Contributors
+ * Copyright (c) 2016-2020 Holger Woltersdorf & Contributors
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -29,9 +29,20 @@ namespace hollodotme\FastCGI\Interfaces;
  */
 interface EncodesNameValuePair
 {
+	/**
+	 * @param array<string, string> $pairs
+	 *
+	 * @return string
+	 */
 	public function encodePairs( array $pairs ) : string;
 
 	public function encodePair( string $name, string $value ) : string;
 
+	/**
+	 * @param string $data
+	 * @param int    $length
+	 *
+	 * @return array<string, string>
+	 */
 	public function decodePairs( string $data, int $length = -1 ) : array;
 }

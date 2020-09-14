@@ -1,7 +1,7 @@
-<?php declare(strict_types = 1);
+<?php declare(strict_types=1);
 /*
  * Copyright (c) 2010-2014 Pierrick Charron
- * Copyright (c) 2016-2019 Holger Woltersdorf & Contributors
+ * Copyright (c) 2016-2020 Holger Woltersdorf & Contributors
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -41,26 +41,30 @@ final class PacketEncoder implements EncodesPacket
 		$contentLength = strlen( $content );
 
 		return chr( self::VERSION )                     /* version */
-		       . chr( $type )                           /* type */
+		       . chr( $type )                                /* type */
 		       . chr( ($requestId >> 8) & 0xFF )        /* requestIdB1 */
 		       . chr( $requestId & 0xFF )               /* requestIdB0 */
 		       . chr( ($contentLength >> 8) & 0xFF )    /* contentLengthB1 */
 		       . chr( $contentLength & 0xFF )           /* contentLengthB0 */
 		       . chr( 0 )                               /* paddingLength */
 		       . chr( 0 )                               /* reserved */
-			   . $content;                              /* content */
+		       . $content;                                   /* content */
 	}
 
+	/**
+	 * @param string $data
+	 *
+	 * @return array<string, int>
+	 */
 	public function decodeHeader( string $data ) : array
 	{
-		$header                  = [];
-		$header['version']       = ord( $data{0} );
-		$header['type']          = ord( $data{1} );
-		$header['requestId']     = (ord( $data{2} ) << 8) + ord( $data{3} );
-		$header['contentLength'] = (ord( $data{4} ) << 8) + ord( $data{5} );
-		$header['paddingLength'] = ord( $data{6} );
-		$header['reserved']      = ord( $data{7} );
-
-		return $header;
+		return [
+			'version'       => ord( $data[0] ),
+			'type'          => ord( $data[1] ),
+			'requestId'     => (ord( $data[2] ) << 8) + ord( $data[3] ),
+			'contentLength' => (ord( $data[4] ) << 8) + ord( $data[5] ),
+			'paddingLength' => ord( $data[6] ),
+			'reserved'      => ord( $data[7] ),
+		];
 	}
 }

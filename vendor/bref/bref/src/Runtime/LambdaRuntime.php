@@ -4,6 +4,10 @@ namespace Bref\Runtime;
 
 use Bref\Context\Context;
 use Bref\Context\ContextBuilder;
+use Bref\Event\Handler;
+use Bref\Event\Http\Psr15Handler;
+use Exception;
+use Psr\Http\Server\RequestHandlerInterface;
 
 /**
  * Client for the AWS Lambda runtime API.
@@ -38,7 +42,7 @@ final class LambdaRuntime
 
     public static function fromEnvironmentVariable(): self
     {
-        return new self(getenv('AWS_LAMBDA_RUNTIME_API'));
+        return new self((string) getenv('AWS_LAMBDA_RUNTIME_API'));
     }
 
     public function __construct(string $apiUrl)
@@ -74,22 +78,40 @@ final class LambdaRuntime
     /**
      * Process the next event.
      *
-     * @param callable $handler This callable takes two parameters, an $event parameter (array) and a $context parameter (Context) and must return anything serializable to JSON.
+     * @param Handler|RequestHandlerInterface|callable $handler If it is a callable, it takes two parameters, an $event parameter (mixed) and a $context parameter (Context) and must return anything serializable to JSON.
      *
      * Example:
      *
-     *     $lambdaRuntime->processNextEvent(function (array $event, Context $context) {
+     *     $lambdaRuntime->processNextEvent(function ($event, Context $context) {
      *         return 'Hello ' . $event['name'] . '. We have ' . $context->getRemainingTimeInMillis()/1000 . ' seconds left';
      *     });
-     * @throws \Exception
+     * @throws Exception
      */
-    public function processNextEvent(callable $handler): void
+    public function processNextEvent($handler): void
     {
         /** @var Context $context */
         [$event, $context] = $this->waitNextInvocation();
 
+        $this->ping();
+
+        $result = null;
+
         try {
-            $this->sendResponse($context->getAwsRequestId(), $handler($event, $context));
+            // PSR-15 adapter
+            if ($handler instanceof RequestHandlerInterface) {
+                $handler = new Psr15Handler($handler);
+            }
+
+            if ($handler instanceof Handler) {
+                $result = $handler->handle($event, $context);
+            } elseif (is_callable($handler)) {
+                // The handler is a callable
+                $result = $handler($event, $context);
+            } else {
+                throw new Exception('The lambda handler must be a callable or implement handler interfaces');
+            }
+
+            $this->sendResponse($context->getAwsRequestId(), $result);
         } catch (\Throwable $e) {
             $this->signalFailure($context->getAwsRequestId(), $e);
         }
@@ -147,16 +169,16 @@ final class LambdaRuntime
         if (curl_errno($this->handler) > 0) {
             $message = curl_error($this->handler);
             $this->closeHandler();
-            throw new \Exception('Failed to fetch next Lambda invocation: ' . $message);
+            throw new Exception('Failed to fetch next Lambda invocation: ' . $message);
         }
         if ($body === '') {
-            throw new \Exception('Empty Lambda runtime API response');
+            throw new Exception('Empty Lambda runtime API response');
         }
 
         $context = $contextBuilder->buildContext();
 
         if ($context->getAwsRequestId() === '') {
-            throw new \Exception('Failed to determine the Lambda invocation ID');
+            throw new Exception('Failed to determine the Lambda invocation ID');
         }
 
         $event = json_decode($body, true);
@@ -180,27 +202,23 @@ final class LambdaRuntime
      */
     private function signalFailure(string $invocationId, \Throwable $error): void
     {
-        if ($error instanceof \Exception) {
-            $errorMessage = 'Uncaught ' . get_class($error) . ': ' . $error->getMessage();
-        } else {
-            $errorMessage = $error->getMessage();
-        }
+        $stackTraceAsArray = explode(PHP_EOL, $error->getTraceAsString());
 
         // Log the exception in CloudWatch
-        printf(
-            "Fatal error: %s in %s:%d\nStack trace:\n%s",
-            $errorMessage,
-            $error->getFile(),
-            $error->getLine(),
-            $error->getTraceAsString()
-        );
+        // We aim to use the same log format as what we can see when throwing an exception in the NodeJS runtime
+        // See https://github.com/brefphp/bref/pull/579
+        echo $invocationId . "\tInvoke Error\t" . json_encode([
+            'errorType' => get_class($error),
+            'errorMessage' => $error->getMessage(),
+            'stack' => $stackTraceAsArray,
+        ]) . PHP_EOL;
 
         // Send an "error" Lambda response
         $url = "http://{$this->apiUrl}/2018-06-01/runtime/invocation/$invocationId/error";
         $this->postJson($url, [
-            'errorMessage' => $error->getMessage(),
             'errorType' => get_class($error),
-            'stackTrace' => explode(PHP_EOL, $error->getTraceAsString()),
+            'errorMessage' => $error->getMessage(),
+            'stackTrace' => $stackTraceAsArray,
         ]);
     }
 
@@ -214,7 +232,7 @@ final class LambdaRuntime
         // Log the exception in CloudWatch
         echo "$message\n";
         if ($error) {
-            if ($error instanceof \Exception) {
+            if ($error instanceof Exception) {
                 $errorMessage = get_class($error) . ': ' . $error->getMessage();
             } else {
                 $errorMessage = $error->getMessage();
@@ -245,7 +263,10 @@ final class LambdaRuntime
     {
         $jsonData = json_encode($data);
         if ($jsonData === false) {
-            throw new \Exception('Failed encoding Lambda JSON response: ' . json_last_error_msg());
+            throw new Exception(sprintf(
+                "The Lambda response cannot be encoded to JSON.\nThis error usually happens when you try to return binary content. If you are writing a HTTP application and you want to return a binary HTTP response (like an image, a PDF, etc.), please read this guide: https://bref.sh/docs/runtimes/http.html#binary-responses\nHere is the original JSON error: '%s'",
+                json_last_error_msg()
+            ));
         }
 
         if ($this->returnHandler === null) {
@@ -265,7 +286,77 @@ final class LambdaRuntime
         if (curl_errno($this->returnHandler) > 0) {
             $errorMessage = curl_error($this->returnHandler);
             $this->closeReturnHandler();
-            throw new \Exception('Error while calling the Lambda runtime API: ' . $errorMessage);
+            throw new Exception('Error while calling the Lambda runtime API: ' . $errorMessage);
         }
+    }
+
+
+    /**
+     * Ping a Bref server with a statsd request.
+     *
+     * WHY?
+     * This ping is used to estimate the number of Bref invocations running in production.
+     * Such statistic can be useful in many ways:
+     * - so that potential Bref users know how much it is used in production
+     * - to communicate to AWS how much Bref is used, and help them consider PHP as a native runtime
+     *
+     * WHAT?
+     * The data sent in the ping is anonymous.
+     * It does not contain any identifiable data about anything (the project, users, etc.).
+     * The only data it contains is: "A Bref invocation happened".
+     * You can verify that by checking the content of the message in the function.
+     *
+     * HOW?
+     * The data is sent via the statsd protocol, over UDP.
+     * Unlike TCP, UDP does not check that the message correctly arrived to the server.
+     * It doesn't even establishes a connection. That means that UDP is extremely fast:
+     * the data is sent over the network and the code moves on to the next line.
+     * When actually sending data, the overhead of that ping takes about 150 micro-seconds.
+     * However, this function actually sends data every 100 invocation, because we don't
+     * need to measure *all* invocations. We only need an approximation.
+     * That means that 99% of the time, no data is sent, and the function takes 30 micro-seconds.
+     * If we average all executions, the overhead of that ping is about 31 micro-seconds.
+     * Given that it is much much less than even 1 milli-second, we consider that overhead
+     * negligible.
+     *
+     * CAN I DISABLE IT?
+     * Yes, set the `BREF_PING_DISABLE` environment variable to `1`.
+     *
+     * About the statsd server and protocol: https://github.com/statsd/statsd
+     * About UDP: https://en.wikipedia.org/wiki/User_Datagram_Protocol
+     */
+    private function ping(): void
+    {
+        if ($_SERVER['BREF_PING_DISABLE'] ?? false) {
+            return;
+        }
+
+        // Only run the code in 1% of requests
+        // We don't need to collect all invocations, only to get an approximation
+        if (rand(0, 99) > 0) {
+            return;
+        }
+
+        /**
+         * Here is the content sent to the Bref analytics server.
+         * It signals an invocation happened.
+         * Nothing else is sent.
+         *
+         * `Invocations_100` is used to signal that this is 1 ping equals 100 invocations.
+         * We could use statsd sample rate system this this:
+         * `Invocations:1|c|@0.01`
+         * but this doesn't seem to be compatible with the bridge that forwards
+         * the metric into CloudWatch.
+         *
+         * See https://github.com/statsd/statsd/blob/master/docs/metric_types.md for more information.
+         */
+        $message = 'Invocations_100:1|c';
+
+        $sock = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+        // This IP address is the Bref server.
+        // If this server is down or unreachable, there should be no difference in overhead
+        // or execution time.
+        socket_sendto($sock, $message, strlen($message), 0, '3.219.198.164', 8125);
+        socket_close($sock);
     }
 }

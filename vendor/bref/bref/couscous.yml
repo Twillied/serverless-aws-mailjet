@@ -33,7 +33,7 @@ menu:
     -   section: Runtimes
         items:
             runtimes-introduction:
-                text: Introduction
+                text: Introduction to PHP runtimes
                 url: /docs/runtimes/
             php-functions:
                 text: PHP functions
@@ -56,6 +56,10 @@ menu:
                 text: Websites
                 url: /docs/websites.html
                 title: Building complete websites with Bref
+            cron:
+                text: Cron
+                url: /docs/cron.html
+                title: Cron tasks
     -   section: Environment
         items:
             serverless-yml:
@@ -86,6 +90,10 @@ menu:
                 text: Custom domains
                 url: /docs/environment/custom-domains.html
                 title: Configuring custom domain names for HTTP applications
+            performances:
+                text: Performance
+                url: /docs/environment/performances.html
+                title: Performance tuning and optimizations
     -   section: Frameworks
         items:
             laravel:

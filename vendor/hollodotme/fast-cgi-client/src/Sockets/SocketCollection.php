@@ -34,19 +34,24 @@ final class SocketCollection implements Countable
 	{
 		for ( $i = 0; $i < 10; $i++ )
 		{
-			$socket = new Socket( $connection, $packetEncoder, $nameValuePairEncoder );
+			$socketId = SocketId::new();
 
-			if ( $this->exists( $socket->getId() ) )
+			if ( $this->exists( $socketId->getValue() ) )
 			{
 				continue;
 			}
 
-			$this->sockets[ $socket->getId() ] = $socket;
+			$this->sockets[ $socketId->getValue() ] = new Socket(
+				$socketId,
+				$connection,
+				$packetEncoder,
+				$nameValuePairEncoder
+			);
 
-			return $socket;
+			return $this->sockets[ $socketId->getValue() ];
 		}
 
-		throw new WriteFailedException( 'Could not allocate a new request ID' );
+		throw new WriteFailedException( 'Could not allocate a new socket ID' );
 	}
 
 	/**
@@ -63,9 +68,9 @@ final class SocketCollection implements Countable
 	}
 
 	/**
-	 * @param array $resources
+	 * @param array<int, resource> $resources
 	 *
-	 * @return array
+	 * @return array<int>
 	 * @throws ReadFailedException
 	 */
 	public function getSocketIdsByResources( array $resources ) : array
@@ -107,7 +112,7 @@ final class SocketCollection implements Countable
 	{
 		if ( !$this->exists( $socketId ) )
 		{
-			throw new ReadFailedException( 'Socket not found for request ID: ' . $socketId );
+			throw new ReadFailedException( 'Socket not found for socket ID: ' . $socketId );
 		}
 	}
 
@@ -121,7 +126,7 @@ final class SocketCollection implements Countable
 		unset( $this->sockets[ $socketId ] );
 	}
 
-	public function getIdleSocket() : ?Socket
+	public function getIdleSocket( ConfiguresSocketConnection $connection ) : ?Socket
 	{
 		if ( $this->isEmpty() )
 		{
@@ -130,6 +135,11 @@ final class SocketCollection implements Countable
 
 		foreach ( $this->sockets as $socket )
 		{
+			if ( !$socket->usesConnection( $connection ) )
+			{
+				continue;
+			}
+
 			if ( !$socket->isIdle() )
 			{
 				continue;
@@ -165,6 +175,9 @@ final class SocketCollection implements Countable
 		return false;
 	}
 
+	/**
+	 * @return array<int, resource>
+	 */
 	public function collectResources() : array
 	{
 		$resources = [];

@@ -1,7 +1,7 @@
-<?php declare(strict_types = 1);
+<?php declare(strict_types=1);
 /*
  * Copyright (c) 2010-2014 Pierrick Charron
- * Copyright (c) 2016-2019 Holger Woltersdorf & Contributors
+ * Copyright (c) 2016-2020 Holger Woltersdorf & Contributors
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -24,6 +24,7 @@
 namespace hollodotme\FastCGI\Requests;
 
 use hollodotme\FastCGI\Constants\RequestMethod;
+use hollodotme\FastCGI\Interfaces\ComposesRequestContent;
 
 /**
  * Class DeleteRequest
@@ -31,6 +32,17 @@ use hollodotme\FastCGI\Constants\RequestMethod;
  */
 class DeleteRequest extends AbstractRequest
 {
+	public static function newWithRequestContent(
+		string $scriptFilename,
+		ComposesRequestContent $requestContent
+	) : DeleteRequest
+	{
+		$instance = new self( $scriptFilename, $requestContent->getContent() );
+		$instance->setContentType( $requestContent->getContentType() );
+
+		return $instance;
+	}
+
 	public function getRequestMethod() : string
 	{
 		return RequestMethod::DELETE;

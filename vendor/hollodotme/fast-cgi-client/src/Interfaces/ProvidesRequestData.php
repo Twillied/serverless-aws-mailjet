@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 /*
  * Copyright (c) 2010-2014 Pierrick Charron
- * Copyright (c) 2016-2019 Holger Woltersdorf & Contributors
+ * Copyright (c) 2016-2020 Holger Woltersdorf & Contributors
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -55,15 +55,30 @@ interface ProvidesRequestData
 
 	public function getContent() : string;
 
+	/**
+	 * @return array<string, mixed>
+	 */
 	public function getCustomVars() : array;
 
+	/**
+	 * @return array<string, mixed>
+	 */
 	public function getParams() : array;
 
 	public function getRequestUri() : string;
 
+	/**
+	 * @return array<callable>
+	 */
 	public function getResponseCallbacks() : array;
 
+	/**
+	 * @return array<callable>
+	 */
 	public function getFailureCallbacks() : array;
 
+	/**
+	 * @return array<callable>
+	 */
 	public function getPassThroughCallbacks() : array;
 }

@@ -2,8 +2,10 @@
 <?php
 declare(strict_types=1);
 
-use Aws\CloudFormation\CloudFormationClient;
-use Aws\CloudFormation\Exception\CloudFormationException;
+use AsyncAws\CloudFormation\CloudFormationClient;
+use AsyncAws\CloudFormation\ValueObject\Output;
+use AsyncAws\CloudFormation\ValueObject\StackEvent;
+use AsyncAws\Core\Exception\Http\HttpException;
 use Bref\Console\LoadingAnimation;
 use Bref\Console\OpenUrl;
 use Bref\Lambda\InvocationFailed;
@@ -90,8 +92,12 @@ $app->command('init', function (SymfonyStyle $io) {
 /**
  * Run a CLI command in the remote environment.
  */
-$app->command('cli function [--region=] [arguments]*', function (string $function, ?string $region, array $arguments, SymfonyStyle $io) {
-    $lambda = new SimpleLambdaClient(($region ?: getenv('AWS_DEFAULT_REGION')) ?: 'us-east-1');
+$app->command('cli function [--region=] [--profile=] [arguments]*', function (string $function, ?string $region, ?string $profile, array $arguments, SymfonyStyle $io) {
+    $lambda = new SimpleLambdaClient(
+        $region ?: getenv('AWS_DEFAULT_REGION') ?: 'us-east-1',
+        $profile ?: getenv('AWS_PROFILE') ?: 'default',
+        15 * 60 // maximum duration on Lambda
+    );
 
     // Because arguments may contain spaces, and are going to be executed remotely
     // as a separate process, we need to escape all arguments.
@@ -100,9 +106,7 @@ $app->command('cli function [--region=] [arguments]*', function (string $functio
     }, $arguments);
 
     try {
-        $result = $lambda->invoke($function, json_encode([
-            'cli' => implode(' ', $arguments),
-        ]));
+        $result = $lambda->invoke($function, json_encode(implode(' ', $arguments)));
     } catch (InvocationFailed $e) {
         $io->getErrorStyle()->writeln('<info>' . $e->getInvocationLogs() . '</info>');
         $io->error($e->getMessage());
@@ -124,13 +128,16 @@ $app->command('cli function [--region=] [arguments]*', function (string $functio
     return (int) ($payload['exitCode'] ?? 1);
 });
 
-$app->command('invoke function [--region=] [-e|--event=]', function (string $function, ?string $region, ?string $event, SymfonyStyle $io) {
+$app->command('invoke function [--region=] [--profile=] [-e|--event=]', function (string $function, ?string $region, ?string $profile, ?string $event, SymfonyStyle $io) {
     $io->warning([
         'The `bref invoke` command is deprecated in favor of the `serverless invoke` command.',
         'Run `serverless invoke --help` to learn how to use it, or read the documentation here: https://bref.sh/docs/runtimes/function.html#cli',
     ]);
 
-    $lambda = new SimpleLambdaClient(($region ?: getenv('AWS_DEFAULT_REGION')) ?: 'us-east-1');
+    $lambda = new SimpleLambdaClient(
+        $region ?: getenv('AWS_DEFAULT_REGION') ?: 'us-east-1',
+        $profile ?: getenv('AWS_PROFILE') ?: 'default'
+    );
 
     try {
         $result = $lambda->invoke($function, $event);
@@ -149,27 +156,33 @@ $app->command('invoke function [--region=] [-e|--event=]', function (string $fun
     '--event' => 'Event data as JSON, e.g. `--event \'{"name":"matt"}\'`',
 ]);
 
-$app->command('deployment stack-name [--region=]', function (string $stackName, ?string $region, SymfonyStyle $io) {
-    $region = ($region ?: getenv('AWS_DEFAULT_REGION')) ?: 'us-east-1';
+$app->command('deployment stack-name [--region=] [--profile=]', function (string $stackName, ?string $region, ?string $profile, SymfonyStyle $io) {
+    $region = $region ?: getenv('AWS_DEFAULT_REGION') ?: 'us-east-1';
+    $profile = $profile ?: getenv('AWS_PROFILE') ?: 'default';
     $cloudFormation = new CloudFormationClient([
-        'version' => 'latest',
         'region' => $region,
+        'profile' => $profile,
     ]);
 
     try {
         $result = $cloudFormation->describeStacks([
             'StackName' => $stackName,
         ]);
-        $stacks = $result->get('Stacks');
-        if (!isset($stacks[0])) {
+        $stack = null;
+        foreach ($result->getStacks() as $currentStack) {
+            $stack = $currentStack;
+            break;
+        }
+
+        if ($stack === null) {
             $io->error(sprintf('The stack %s cannot be found in region %s', $stackName, $region));
             return 1;
         }
-        $stack = $stacks[0];
-    } catch (CloudFormationException $e) {
+
+    } catch (HttpException $e) {
         $io->error([
             "Error while fetching information about the stack `$stackName` in region `$region`:",
-            sprintf('"%s"', $e->getAwsErrorMessage()),
+            sprintf('"%s"', $e->getAwsMessage()),
             "In case the stack was not found make sure that `$region` is the correct region.",
         ]);
         return 1;
@@ -180,14 +193,14 @@ $app->command('deployment stack-name [--region=]', function (string $stackName, 
     $result = $cloudFormation->describeStackEvents([
         'StackName' => $stackName,
     ]);
-    $events = $result->get('StackEvents');
+    $events = iterator_to_array($result->getStackEvents(true));
 
     // Last events last
     $events = array_reverse($events);
     // Keep only events from the last 24 hours
     $oneDayAgo = new DateTimeImmutable('-1 day');
-    $events = array_filter($events, function (array $event) use ($oneDayAgo) {
-        return $event['Timestamp'] >= $oneDayAgo;
+    $events = array_filter($events, function (StackEvent $event) use ($oneDayAgo) {
+        return $event->getTimestamp() >= $oneDayAgo;
     });
 
     if (empty($events)) {
@@ -196,9 +209,9 @@ $app->command('deployment stack-name [--region=]', function (string $stackName, 
         $errors = [];
         foreach ($events as $event) {
             /** @var DateTimeInterface $time */
-            $time = $event['Timestamp'];
+            $time = $event->getTimestamp();
 
-            $status = $event['ResourceStatus'];
+            $status = $event->getResourceStatus();
             $error = false;
             if (strpos($status, 'FAILED') !== false) {
                 $error = true;
@@ -209,11 +222,11 @@ $app->command('deployment stack-name [--region=]', function (string $stackName, 
                 '<comment>%s</comment> %s %s',
                 $time->format('M j G:H'),
                 $error ? "<error>$status</error>" : $status,
-                $event['ResourceType']
+                $event->getResourceType()
             ));
 
-            if (isset($event['ResourceStatusReason'])) {
-                $io->write(" <info>{$event['ResourceStatusReason']}</info>");
+            if (null !== $event->getResourceStatusReason()) {
+                $io->write(" <info>{$event->getResourceStatusReason()}</info>");
             }
             $io->writeln('');
         }
@@ -225,34 +238,38 @@ $app->command('deployment stack-name [--region=]', function (string $stackName, 
             $io->writeln('<error>Summary of the errors found:</error>');
             foreach ($errors as $event) {
                 /** @var DateTimeInterface $time */
-                $time = $event['Timestamp'];
+                $time = $event->getTimestamp();
                 $io->writeln(sprintf(
                     '<comment>%s</comment> <info>%s</info> %s',
                     $time->format('M j G:H'),
-                    $event['ResourceType'],
-                    $event['ResourceStatusReason'] ?? ''
+                    $event->getResourceType() ?? '',
+                    $event->getResourceStatusReason() ?? ''
                 ));
             }
         }
     }
 
-    if (isset($stack['Outputs']) && !empty($stack['Outputs'])) {
+    $outputs = $stack->getOutputs();
+    if (!empty($outputs)) {
         $io->section('Outputs');
-        $io->listing(array_map(function (array $output): string {
+        $io->listing(array_map(function (Output $output): string {
             return sprintf(
                 '%s: <info>%s</info>',
-                $output['Description'] ?? $output['OutputKey'],
-                $output['OutputValue']
+                $output->getDescription() ?? $output->getOutputKey(),
+                $output->getOutputValue() ?? ''
             );
-        }, $stack['Outputs']));
+        }, $outputs));
     }
 
     return 0;
 })->descriptions('Displays the latest deployment logs from CloudFormation. Only the logs from the last 24 hours are displayed. Use these logs to debug why a deployment failed.');
 
-$app->command('dashboard [--host=] [--port=] [--profile=] [--stage=]', function (string $host = 'localhost', int $port = 8000, string $profile = 'default', string $stage = null, SymfonyStyle $io) {
+$app->command('dashboard [--host=] [--port=] [--profile=] [--stage=]', function (SymfonyStyle $io, string $host = 'localhost', int $port = 8000, string $profile = null, string $stage = null) {
     if ($host === 'localhost') {
         $host = '127.0.0.1';
+    }
+    if ($profile === null) {
+        $profile = getenv('AWS_PROFILE') ?: 'default';
     }
 
     if (! file_exists('serverless.yml')) {
@@ -280,29 +297,29 @@ $app->command('dashboard [--host=] [--port=] [--profile=] [--stage=]', function 
         return 1;
     }
 
-    $servelessInfo = new Process(['serverless', 'info', '--stage', $stage, '--aws-profile', $profile]);
-    $servelessInfo->start();
+    $serverlessInfo = new Process(['serverless', 'info', '--stage', $stage, '--aws-profile', $profile]);
+    $serverlessInfo->start();
     $animation = new LoadingAnimation($io);
     do {
         $animation->tick('Retrieving the stack');
         usleep(100*1000);
-    } while ($servelessInfo->isRunning());
+    } while ($serverlessInfo->isRunning());
     $animation->clear();
 
-    if (!$servelessInfo->isSuccessful()) {
-        $io->error('The command `serverless info` failed' . PHP_EOL . $servelessInfo->getErrorOutput());
+    if (!$serverlessInfo->isSuccessful()) {
+        $io->error('The command `serverless info` failed' . PHP_EOL . $serverlessInfo->getOutput());
 
         return 1;
     }
 
-    $servelessInfoOutput = $servelessInfo->getOutput();
+    $serverlessInfoOutput = $serverlessInfo->getOutput();
 
     $region = [];
-    preg_match('/region: ([a-z0-9-]*)/', $servelessInfoOutput, $region);
+    preg_match('/region: ([a-z0-9-]*)/', $serverlessInfoOutput, $region);
     $region = $region[1];
 
     $stack = [];
-    preg_match('/stack: ([a-zA-Z0-9-]*)/', $servelessInfoOutput, $stack);
+    preg_match('/stack: ([a-zA-Z0-9-]*)/', $serverlessInfoOutput, $stack);
     $stack = $stack[1];
 
     $io->writeln("Stack: <fg=yellow>$stack ($region)</>");
@@ -330,8 +347,8 @@ $app->command('dashboard [--host=] [--port=] [--profile=] [--stage=]', function 
     do {
         $animation->tick('Starting the dashboard');
         usleep(100*1000);
-        $serverOutput = $process->getOutput();
-        $hasStarted = (strpos($serverOutput, 'Development Server started') !== false);
+        $serverOutput = $process->getOutput() . $process->getErrorOutput();
+        $hasStarted = (strpos($serverOutput, 'Development Server') !== false);
     } while ($process->isRunning() && !$hasStarted);
     $animation->clear();
     if (!$process->isRunning()) {
@@ -355,5 +372,89 @@ $app->command('dashboard [--host=] [--port=] [--profile=] [--stage=]', function 
 
     return $process->getExitCode();
 })->descriptions('Start the dashboard');
+
+$app->command('bref.dev [--profile=] [--stage=]', function (?string $profile, string $stage = null, SymfonyStyle $io) {
+    $profile = $profile ?: getenv('AWS_PROFILE') ?: 'default';
+    if (! file_exists('serverless.yml')) {
+        $io->error('No `serverless.yml` file found.');
+
+        return 1;
+    }
+    if (! (new ExecutableFinder)->find('serverless')) {
+        $io->error(
+            'The `serverless` command is not installed.' . PHP_EOL .
+            'Please follow the instructions at https://bref.sh/docs/installation.html'
+        );
+
+        return 1;
+    }
+
+    $serverlessInfo = new Process(['serverless', 'info', '--stage', $stage, '--aws-profile', $profile]);
+    $serverlessInfo->start();
+    $animation = new LoadingAnimation($io);
+    do {
+        $animation->tick('Retrieving the API Gateway URL');
+        usleep(100*1000);
+    } while ($serverlessInfo->isRunning());
+    $animation->clear();
+    if (!$serverlessInfo->isSuccessful()) {
+        $io->error('The command `serverless info` failed' . PHP_EOL . $serverlessInfo->getErrorOutput());
+
+        return 1;
+    }
+
+    $serverlessInfoOutput = $serverlessInfo->getOutput();
+
+    // Region
+    $regionMatches = [];
+    preg_match('/region: ([a-z0-9-]*)/', $serverlessInfoOutput, $regionMatches);
+    $region = $regionMatches[1];
+    // Stage
+    $stageMatches = [];
+    preg_match('/stage: ([a-z0-9-]*)/', $serverlessInfoOutput, $stageMatches);
+    $stage = $stageMatches[1];
+    // API ID
+    $apiIdMatches = [];
+    preg_match('# - https://([^.]+)\.execute-api\.#', $serverlessInfoOutput, $apiIdMatches);
+    $apiId = $apiIdMatches[1];
+
+    $io->writeln("Creating a short URL for <info>https://$apiId.execute-api.$region.amazonaws.com/$stage</info>");
+    $client = new GuzzleHttp\Client();
+    $response = $client->request('POST', 'https://api.bref.dev/site', [
+        'json' => [
+            'apiId' => $apiId,
+            'region' => $region,
+            'stage' => $stage,
+        ],
+    ]);
+    $response = json_decode((string) $response->getBody(), true);
+    $shortUrl = $response['url'];
+    $io->writeln("Short URL created and active for 7 days: <info>$shortUrl</info>");
+    $io->writeln('<comment>Please use this URL for development only and avoid load testing it with a lot of traffic. That helps us provide the service for free. The service is currently in beta and can change at any moment.</comment>');
+
+    return 0;
+})->descriptions('Create a short URL on bref.dev');
+
+$app->command('layers region', function (string $region, SymfonyStyle $io) {
+    $layers = json_decode(file_get_contents(__DIR__ . '/layers.json'), true);
+    $io->title("Layers for the $region region");
+
+    $array = [];
+    foreach ($layers as $layer => $versions) {
+        $version = $versions[$region];
+        $array[] = [
+            $layer,
+            $version,
+            "arn:aws:lambda:$region:416566615250:layer:$layer:$version",
+        ];
+    }
+    $io->table([
+        'Layer',
+        'Version',
+        'ARN',
+    ], $array);
+
+    return 0;
+})->descriptions('Displays the versions of the Bref layers');
 
 $app->run();

@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 /*
  * Copyright (c) 2010-2014 Pierrick Charron
- * Copyright (c) 2016-2019 Holger Woltersdorf & Contributors
+ * Copyright (c) 2016-2020 Holger Woltersdorf & Contributors
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -25,6 +25,9 @@ namespace hollodotme\FastCGI\Responses;
 
 use hollodotme\FastCGI\Interfaces\ProvidesResponseData;
 use function array_slice;
+use function implode;
+use function strtolower;
+use function trim;
 
 /**
  * Class Response
@@ -34,10 +37,10 @@ class Response implements ProvidesResponseData
 {
 	private const HEADER_PATTERN = '#^([^\:]+):(.*)$#';
 
-	/** @var int */
-	private $requestId;
+	/** @var array<string, array<int, string>> */
+	private $normalizedHeaders;
 
-	/** @var array */
+	/** @var array<string, array<int, string>> */
 	private $headers;
 
 	/** @var string */
@@ -52,14 +55,14 @@ class Response implements ProvidesResponseData
 	/** @var float */
 	private $duration;
 
-	public function __construct( int $requestId, string $output, string $error, float $duration )
+	public function __construct( string $output, string $error, float $duration )
 	{
-		$this->requestId = $requestId;
-		$this->output    = $output;
-		$this->error     = $error;
-		$this->duration  = $duration;
-		$this->headers   = [];
-		$this->body      = '';
+		$this->output            = $output;
+		$this->error             = $error;
+		$this->duration          = $duration;
+		$this->normalizedHeaders = [];
+		$this->headers           = [];
+		$this->body              = '';
 
 		$this->parseHeadersAndBody();
 	}
@@ -71,27 +74,57 @@ class Response implements ProvidesResponseData
 
 		foreach ( $lines as $i => $line )
 		{
-			if ( preg_match( self::HEADER_PATTERN, $line, $matches ) )
+			$matches = [];
+			if ( !preg_match( self::HEADER_PATTERN, $line, $matches ) )
 			{
-				$offset                               = $i;
-				$this->headers[ trim( $matches[1] ) ] = trim( $matches[2] );
-				continue;
+				break;
 			}
 
-			break;
+			$offset      = $i;
+			$headerKey   = trim( $matches[1] );
+			$headerValue = trim( $matches[2] );
+
+			$this->addRawHeader( $headerKey, $headerValue );
+			$this->addNormalizedHeader( $headerKey, $headerValue );
 		}
 
 		$this->body = implode( PHP_EOL, array_slice( $lines, $offset + 2 ) );
 	}
 
-	public function getRequestId() : int
+	private function addRawHeader( string $headerKey, string $headerValue ) : void
 	{
-		return $this->requestId;
+		if ( !isset( $this->headers[ $headerKey ] ) )
+		{
+			$this->headers[ $headerKey ] = [$headerValue];
+
+			return;
+		}
+
+		$this->headers[ $headerKey ][] = $headerValue;
 	}
 
-	public function getHeader( string $headerKey ) : string
+	private function addNormalizedHeader( string $headerKey, string $headerValue ) : void
 	{
-		return $this->headers[ $headerKey ] ?? '';
+		$key = strtolower( $headerKey );
+
+		if ( !isset( $this->normalizedHeaders[ $key ] ) )
+		{
+			$this->normalizedHeaders[ $key ] = [$headerValue];
+
+			return;
+		}
+
+		$this->normalizedHeaders[ $key ][] = $headerValue;
+	}
+
+	public function getHeader( string $headerKey ) : array
+	{
+		return $this->normalizedHeaders[ strtolower( $headerKey ) ] ?? [];
+	}
+
+	public function getHeaderLine( string $headerKey ) : string
+	{
+		return implode( ', ', $this->getHeader( $headerKey ) );
 	}
 
 	public function getHeaders() : array
@@ -102,15 +135,6 @@ class Response implements ProvidesResponseData
 	public function getBody() : string
 	{
 		return $this->body;
-	}
-
-	/**
-	 * @return string
-	 * @deprecated Will be removed in v3.0.0. Please use Response#getOutput() instead.
-	 */
-	public function getRawResponse() : string
-	{
-		return $this->output;
 	}
 
 	public function getOutput() : string

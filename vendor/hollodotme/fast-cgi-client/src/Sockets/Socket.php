@@ -1,7 +1,7 @@
 <?php declare(strict_types=1);
 /*
  * Copyright (c) 2010-2014 Pierrick Charron
- * Copyright (c) 2016-2019 Holger Woltersdorf & Contributors
+ * Copyright (c) 2016-2020 Holger Woltersdorf & Contributors
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
@@ -46,7 +46,6 @@ use function fwrite;
 use function is_resource;
 use function microtime;
 use function ord;
-use function random_int;
 use function str_repeat;
 use function stream_get_meta_data;
 use function stream_select;
@@ -60,6 +59,8 @@ use const STREAM_SHUT_RDWR;
 final class Socket
 {
 	private const BEGIN_REQUEST        = 1;
+
+	private const ABORT_REQUEST        = 2;
 
 	private const END_REQUEST          = 3;
 
@@ -93,13 +94,13 @@ final class Socket
 
 	public const  STREAM_SELECT_USEC   = 200000;
 
-	/** @var int */
+	/** @var SocketId */
 	private $id;
 
 	/** @var ConfiguresSocketConnection */
 	private $connection;
 
-	/** @var resource */
+	/** @var null|resource */
 	private $resource;
 
 	/** @var EncodesPacket */
@@ -127,6 +128,7 @@ final class Socket
 	private $status;
 
 	/**
+	 * @param SocketId                   $socketId
 	 * @param ConfiguresSocketConnection $connection
 	 * @param EncodesPacket              $packetEncoder
 	 * @param EncodesNameValuePair       $nameValuePairEncoder
@@ -134,12 +136,13 @@ final class Socket
 	 * @throws Exception
 	 */
 	public function __construct(
+		SocketId $socketId,
 		ConfiguresSocketConnection $connection,
 		EncodesPacket $packetEncoder,
 		EncodesNameValuePair $nameValuePairEncoder
 	)
 	{
-		$this->id                   = random_int( 1, (1 << 16) - 1 );
+		$this->id                   = $socketId;
 		$this->connection           = $connection;
 		$this->packetEncoder        = $packetEncoder;
 		$this->nameValuePairEncoder = $nameValuePairEncoder;
@@ -151,11 +154,21 @@ final class Socket
 
 	public function getId() : int
 	{
-		return $this->id;
+		return $this->id->getValue();
+	}
+
+	public function usesConnection( ConfiguresSocketConnection $connection ) : bool
+	{
+		return $this->connection->equals( $connection );
 	}
 
 	public function hasResponse() : bool
 	{
+		if ( !is_resource( $this->resource ) )
+		{
+			return false;
+		}
+
 		$reads  = [$this->resource];
 		$writes = $excepts = null;
 
@@ -222,7 +235,7 @@ final class Socket
 			return true;
 		}
 
-		/** @var false|array $metaData */
+		/** @var false|array<string, mixed> $metaData */
 		$metaData = @stream_get_meta_data( $this->resource );
 
 		if ( false === $metaData )
@@ -313,6 +326,11 @@ final class Socket
 
 	private function setStreamTimeout( int $timeoutMs ) : bool
 	{
+		if ( !is_resource( $this->resource ) )
+		{
+			return false;
+		}
+
 		return stream_set_timeout(
 			$this->resource,
 			(int)floor( $timeoutMs / 1000 ),
@@ -326,17 +344,21 @@ final class Socket
 		$requestPackets = $this->packetEncoder->encodePacket(
 			self::BEGIN_REQUEST,
 			chr( 0 ) . chr( self::RESPONDER ) . chr( 1 ) . str_repeat( chr( 0 ), 5 ),
-			$this->id
+			$this->id->getValue()
 		);
 
 		$paramsRequest = $this->nameValuePairEncoder->encodePairs( $request->getParams() );
 
 		if ( $paramsRequest )
 		{
-			$requestPackets .= $this->packetEncoder->encodePacket( self::PARAMS, $paramsRequest, $this->id );
+			$requestPackets .= $this->packetEncoder->encodePacket(
+				self::PARAMS,
+				$paramsRequest,
+				$this->id->getValue()
+			);
 		}
 
-		$requestPackets .= $this->packetEncoder->encodePacket( self::PARAMS, '', $this->id );
+		$requestPackets .= $this->packetEncoder->encodePacket( self::PARAMS, '', $this->id->getValue() );
 
 		if ( $request->getContent() )
 		{
@@ -350,14 +372,14 @@ final class Socket
 						$offset,
 						self::REQ_MAX_CONTENT_SIZE
 					),
-					$this->id
+					$this->id->getValue()
 				);
 				$offset         += self::REQ_MAX_CONTENT_SIZE;
 			}
 			while ( $offset < $request->getContentLength() );
 		}
 
-		$requestPackets .= $this->packetEncoder->encodePacket( self::STDIN, '', $this->id );
+		$requestPackets .= $this->packetEncoder->encodePacket( self::STDIN, '', $this->id->getValue() );
 
 		return $requestPackets;
 	}
@@ -370,8 +392,13 @@ final class Socket
 	 */
 	private function write( string $data ) : void
 	{
-		$writeResult = fwrite( $this->resource, $data );
-		$flushResult = fflush( $this->resource );
+		if ( !is_resource( $this->resource ) )
+		{
+			throw new WriteFailedException( 'Failed to write request to socket [broken pipe]' );
+		}
+
+		$writeResult = @fwrite( $this->resource, $data );
+		$flushResult = @fflush( $this->resource );
 
 		if ( $writeResult === false || !$flushResult )
 		{
@@ -407,7 +434,13 @@ final class Socket
 
 		do
 		{
-			$packet     = $this->readPacket();
+			$packet = $this->readPacket();
+
+			if ( null === $packet )
+			{
+				break;
+			}
+
 			$packetType = (int)$packet['type'];
 
 			if ( self::STDERR === $packetType )
@@ -424,7 +457,7 @@ final class Socket
 				continue;
 			}
 
-			if ( self::END_REQUEST === $packetType && $packet['requestId'] === $this->id )
+			if ( self::END_REQUEST === $packetType && $packet['requestId'] === $this->id->getValue() )
 			{
 				break;
 			}
@@ -432,11 +465,10 @@ final class Socket
 		while ( null !== $packet );
 
 		$this->handleNullPacket( $packet );
-		$character = (string)$packet['content']{4};
+		$character = isset( $packet['content'] ) ? ((string)$packet['content'])[4] : '';
 		$this->guardRequestCompleted( ord( $character ) );
 
 		$this->response = new Response(
-			$this->id,
 			$output,
 			$error,
 			microtime( true ) - $this->startTime
@@ -448,8 +480,16 @@ final class Socket
 		return $this->response;
 	}
 
+	/**
+	 * @return array<string, mixed>|null
+	 */
 	private function readPacket() : ?array
 	{
+		if ( !is_resource( $this->resource ) )
+		{
+			return null;
+		}
+
 		if ( $header = fread( $this->resource, self::HEADER_LEN ) )
 		{
 			$packet            = $this->packetEncoder->decodeHeader( $header );
@@ -469,7 +509,7 @@ final class Socket
 			if ( $packet['paddingLength'] )
 			{
 				/** @noinspection UnusedFunctionResultInspection */
-				fread( $this->resource, $packet['paddingLength'] );
+				fread( $this->resource, (int)$packet['paddingLength'] );
 			}
 
 			return $packet;
@@ -487,14 +527,14 @@ final class Socket
 	}
 
 	/**
-	 * @param array|null $packet
+	 * @param array<string, mixed>|null $packet
 	 *
 	 * @throws ReadFailedException
 	 * @throws TimedoutException
 	 */
 	private function handleNullPacket( ?array $packet ) : void
 	{
-		if ( $packet === null )
+		if ( $packet === null && is_resource( $this->resource ) )
 		{
 			$info = stream_get_meta_data( $this->resource );
 
@@ -569,11 +609,14 @@ final class Socket
 		}
 	}
 
+	/**
+	 * @param array<int, resource> $resources
+	 */
 	public function collectResource( array &$resources ) : void
 	{
 		if ( null !== $this->resource )
 		{
-			$resources[ (string)$this->id ] = $this->resource;
+			$resources[ (string)$this->id->getValue() ] = $this->resource;
 		}
 	}
 }
